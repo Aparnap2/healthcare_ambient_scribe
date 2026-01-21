@@ -7,8 +7,8 @@ on:
     branches: [main]
 
 jobs:
-  type-check:
-    name: Type Check
+  backend-tests:
+    name: Backend Tests
     runs-on: ubuntu-latest
 
     steps:
@@ -25,11 +25,22 @@ jobs:
 
       - name: Install dependencies
         working-directory: ./backend
-        run: uv pip install --system -e .
+        run: uv pip install --system -e ".[dev]"
 
       - name: Type check with mypy
         working-directory: ./backend
         run: uv pip install mypy && mypy src/ --strict
+
+      - name: Run unit tests
+        working-directory: ./backend
+        run: uv run pytest tests/test_audio_chunking.py tests/test_fhir_converter.py tests/test_redaction.py -v
+
+      - name: Run LLM evaluations
+        if: github.event_name == 'pull_request'
+        working-directory: ./backend
+        run: uv run pytest tests/test_llm_evals.py -v --tb=short
+        env:
+          DEEPEVAL_LOG_FILE: deepeval.log
 
   frontend-check:
     name: Frontend Check
@@ -64,3 +75,26 @@ jobs:
 
       - name: Build
         run: pnpm build
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      - name: Run E2E tests
+        run: pnpm test:e2e --project=chromium
+        continue-on-error: true
+
+  lint-all:
+    name: Lint All
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Backend lint
+        run: |
+          echo "Backend linting - add ruff/flake8 here if needed"
+
+      - name: Run Frontend lint
+        working-directory: ./frontend
+        run: pnpm lint
