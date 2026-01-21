@@ -1,0 +1,70 @@
+// Prisma schema for Healthcare Ambient Scribe
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum EncounterStatus {
+  RECORDING
+  PROCESSING
+  REVIEW
+  SIGNED
+}
+
+model Clinician {
+  id        String   @id @default(cuid())
+  name      String
+  specialty String?
+  email     String?  @unique
+  encounters Encounter[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Patient {
+  id        String   @id @default(cuid())
+  name      String
+  dob       DateTime?
+  mrn       String?  @unique // Medical Record Number
+  encounters Encounter[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Encounter {
+  id            String         @id @default(cuid())
+  clinicianId   String
+  patientId     String
+  status        EncounterStatus @default(RECORDING)
+
+  // Audio
+  audioUrl      String?
+
+  // Transcript
+  transcript    String?
+
+  // SOAP Note
+  soapSubjective String?
+  soapObjective String?
+  soapAssessment String?
+  soapPlan       String?
+  icd10Codes     String[]
+
+  // FHIR
+  fhirBundleId   String?
+
+  // Timestamps
+  encounterDate  DateTime       @default(now())
+  signedAt       DateTime?
+
+  // Relations
+  clinician      Clinician      @relation(fields: [clinicianId], references: [id])
+  patient        Patient        @relation(fields: [patientId], references: [id])
+
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+}
