@@ -5,6 +5,7 @@ FastAPI service that generates clinical SOAP notes from transcripts
 using Ollama (qwen2.5-coder:3b).
 """
 import os
+import re
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import List, Optional
@@ -14,6 +15,18 @@ app = FastAPI(title="Healthcare AI Service")
 
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5-coder:3b")
+
+
+# PII Patterns for redaction
+PII_PATTERNS = {
+    "NAME": r'\b[A-Z][a-z]+\s+[A-Z][a-z]+\b',
+    "PHONE": r'\b(\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b',
+    "EMAIL": r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b',
+    "SSN": r'\b\d{3}[-\s]?\d{2}[-\s]?\d{4}\b',
+    "DATE": r'\b(\d{1,2}[-/]\d{1,2}[-/]\d{2,4}|\d{4}[-/]\d{1,2}[-/]\d{1,2})\b',
+    "MRN": r'\b(MRN|mrn)[-:#]?\s*\d+\b',
+    "ADDRESS": r'\d{1,5}\s+[\w\s]+(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Lane|Ln|Drive|Dr|Court|Ct|Way|Circle|Cir)\b',
+}
 
 
 class SoapRequest(BaseModel):
@@ -36,6 +49,15 @@ class SoapResponse(BaseModel):
 
 class GenerateSoapRequest(BaseModel):
     transcript: str
+
+
+class RedactRequest(BaseModel):
+    text: str
+
+
+class RedactResponse(BaseModel):
+    redacted_text: str
+    entities_found: dict
 
 
 @app.post("/api/ai/generate-soap", response_model=SoapResponse)
@@ -90,7 +112,6 @@ clinical transcript into a structured SOAP note. Return ONLY valid JSON.
             soap_data = json.loads(content)
         except json.JSONDecodeError:
             # Extract JSON from response
-            import re
             json_match = re.search(r'\{[\s\S]*\}', content)
             if json_match:
                 soap_data = json.loads(json_match.group())
@@ -109,6 +130,70 @@ clinical transcript into a structured SOAP note. Return ONLY valid JSON.
         icd10_codes=soap_data.get("icd10_codes", []),
         processing_time_ms=elapsed,
     )
+
+
+@app.post("/api/ai/redact", response_model=RedactResponse)
+async def redact_pii(request: RedactRequest) -> RedactResponse:
+    """
+    Redact PII from text using regex patterns.
+    This is a lightweight implementation for demo purposes.
+    For production, consider using Microsoft Presidio.
+    """
+    text = request.text
+    entities_found = {}
+
+    for pii_type, pattern in PII_PATTERNS.items():
+        matches = re.findall(pattern, text)
+        if matches:
+            entities_found[pii_type] = len(matches)
+            # Replace with placeholder
+            text = re.sub(pattern, f"[{pii_type}]", text)
+
+    # Also replace common name patterns in clinical context
+    common_replacements = [
+        (r'\b(Patient|pt|Pt)\s+[A-Z][a-z]+\b', '[PATIENT_NAME]'),
+        (r'\b(Doctor|Dr\.?)\s+[A-Z][a-z]+\b', '[PROVIDER_NAME]'),
+    ]
+
+    for pattern, replacement in common_replacements:
+        matches = re.findall(pattern, text)
+        if matches:
+            entities_found["CONTEXT_NAMES"] = entities_found.get("CONTEXT_NAMES", 0) + len(matches)
+            text = re.sub(pattern, replacement, text)
+
+    return RedactResponse(
+        redacted_text=text,
+        entities_found=entities_found
+    )
+
+
+@app.post("/api/ai/redact-stream")
+async def redact_pii_stream(request: RedactRequest):
+    """
+    Redact PII and return structured data for streaming.
+    Returns redacted text along with a mapping of what was redacted.
+    """
+    text = request.text
+    redaction_map = []
+
+    for pii_type, pattern in PII_PATTERNS.items():
+        matches = re.finditer(pattern, text)
+        for match in matches:
+            redaction_map.append({
+                "type": pii_type,
+                "original": match.group(),
+                "replacement": f"[{pii_type}]"
+            })
+
+    # Apply redactions
+    for pii_type, pattern in PII_PATTERNS.items():
+        text = re.sub(pattern, f"[{pii_type}]", text)
+
+    return {
+        "redacted_text": text,
+        "redaction_map": redaction_map,
+        "warnings": ["This is a regex-based redaction. For production use, consider Microsoft Presidio for NLP-based detection."]
+    }
 
 
 @app.get("/health")

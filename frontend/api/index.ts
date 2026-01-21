@@ -285,4 +285,230 @@ app.post('/api/encounters/:id/sign', async (c) => {
   }
 })
 
+// FHIR Export - Generate FHIR Bundle for an encounter
+app.get('/api/encounters/:id/fhir', async (c) => {
+  const id = c.req.param('id')
+  try {
+    const prisma = getPrisma()
+    const encounter = await prisma.encounter.findUnique({
+      where: { id },
+      include: {
+        clinician: true,
+        patient: true,
+      },
+    })
+
+    if (!encounter) {
+      return c.json({ error: 'Encounter not found' }, 404)
+    }
+
+    // Generate FHIR Bundle
+    const fhirBundle = generateFhirBundle(encounter)
+
+    return c.json(fhirBundle)
+  } catch (error) {
+    console.error('Error generating FHIR bundle:', error)
+    return c.json({ error: 'Failed to generate FHIR bundle' }, 500)
+  }
+})
+
+// Post FHIR Bundle to external FHIR server
+app.post('/api/encounters/:id/fhir-export', async (c) => {
+  const id = c.req.param('id')
+  try {
+    const prisma = getPrisma()
+    const encounter = await prisma.encounter.findUnique({
+      where: { id },
+      include: {
+        clinician: true,
+        patient: true,
+      },
+    })
+
+    if (!encounter) {
+      return c.json({ error: 'Encounter not found' }, 404)
+    }
+
+    // Generate FHIR Bundle
+    const fhirBundle = generateFhirBundle(encounter)
+
+    // Post to external FHIR server
+    const fhirServerUrl = process.env.FHIR_BASE_URL || 'http://localhost:8080/fhir'
+    const response = await fetch(fhirServerUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/fhir+json',
+        'Accept': 'application/fhir+json',
+      },
+      body: JSON.stringify(fhirBundle),
+    })
+
+    if (!response.ok) {
+      const errorText = await response.text()
+      return c.json({
+        error: 'Failed to post to FHIR server',
+        details: errorText
+      }, 500)
+    }
+
+    const fhirResult = await response.json()
+
+    // Update encounter with FHIR bundle ID
+    await prisma.encounter.update({
+      where: { id },
+      data: { fhirBundleId: fhirResult.id },
+    })
+
+    return c.json({
+      success: true,
+      fhirId: fhirResult.id,
+      fhirUrl: `${fhirServerUrl}/${fhirResult.resourceType}/${fhirResult.id}`
+    })
+  } catch (error) {
+    console.error('Error exporting to FHIR:', error)
+    return c.json({ error: 'Failed to export to FHIR server' }, 500)
+  }
+})
+
+// FHIR Bundle generator function
+function generateFhirBundle(encounter: {
+  id: string
+  status: string
+  soapSubjective?: string | null
+  soapObjective?: string | null
+  soapAssessment?: string | null
+  soapPlan?: string | null
+  icd10Codes: string[]
+  encounterDate: Date
+  signedAt?: Date | null
+  clinician: { id: string; name: string; specialty?: string | null }
+  patient: { id: string; name: string; dob?: Date | null; mrn?: string | null }
+}) {
+  const now = new Date().toISOString()
+
+  // Generate unique IDs
+  const patientId = `patient-${encounter.patient.id}`
+  const practitionerId = `practitioner-${encounter.clinician.id}`
+  const encounterId = `encounter-${encounter.id}`
+  const compositionId = `composition-${encounter.id}`
+
+  return {
+    resourceType: 'Bundle',
+    type: 'collection',
+    timestamp: now,
+    entry: [
+      // Patient Resource
+      {
+        resource: {
+          resourceType: 'Patient',
+          id: patientId,
+          identifier: encounter.patient.mrn ? [{
+            system: 'http://hospital.example.org/mrn',
+            value: encounter.patient.mrn
+          }] : [],
+          name: [{
+            use: 'official',
+            family: encounter.patient.name.split(' ').pop(),
+            given: [encounter.patient.name.split(' ')[0]]
+          }],
+          birthDate: encounter.patient.dob ? encounter.patient.dob.toISOString().split('T')[0] : undefined
+        }
+      },
+      // Practitioner Resource
+      {
+        resource: {
+          resourceType: 'Practitioner',
+          id: practitionerId,
+          name: [{
+            use: 'official',
+            family: encounter.clinician.name.split(' ').pop(),
+            given: [encounter.clinician.name.split(' ').slice(0, -1).join(' ')],
+            prefix: ['Dr.']
+          }],
+          qualification: encounter.clinician.specialty ? [{
+            code: {
+              coding: [{
+                system: 'http://terminology.hl7.org/CodeSystem/v2-0360',
+                code: 'MD',
+                display: encounter.clinician.specialty
+              }]
+            }
+          }] : []
+        }
+      },
+      // Encounter Resource
+      {
+        resource: {
+          resourceType: 'Encounter',
+          id: encounterId,
+          status: encounter.status === 'SIGNED' ? 'finished' :
+                  encounter.status === 'REVIEW' ? 'in-progress' :
+                  encounter.status === 'PROCESSING' ? 'in-progress' : 'in-progress',
+          class: {
+            system: 'http://terminology.hl7.org/CodeSystem/v3-ActCode',
+            code: 'AMB',
+            display: 'ambulatory'
+          },
+          subject: { reference: `Patient/${patientId}` },
+          participant: [{
+            individual: { reference: `Practitioner/${practitionerId}` }
+          }],
+          period: {
+            start: encounter.encounterDate.toISOString(),
+            end: encounter.signedAt?.toISOString() || now
+          },
+          reasonCode: encounter.icd10Codes.length > 0 ? [{
+            coding: encounter.icd10Codes.map(code => ({
+              system: 'http://hl7.org/fhir/sid/icd-10-cm',
+              code: code,
+              display: code
+            }))
+          }] : undefined
+        }
+      },
+      // Composition Resource (Clinical Document)
+      {
+        resource: {
+          resourceType: 'Composition',
+          id: compositionId,
+          status: 'final',
+          type: {
+            coding: [{
+              system: 'http://loinc.org',
+              code: '34108-1',
+              display: 'Outpatient Note'
+            }]
+          },
+          subject: { reference: `Patient/${patientId}` },
+          date: now,
+          author: [{ reference: `Practitioner/${practitionerId}` }],
+          encounter: { reference: `Encounter/${encounterId}` },
+          section: [
+            {
+              title: 'Subjective',
+              code: { text: 'Patient symptoms and history' },
+              text: { div: `<div>${encounter.soapSubjective || 'N/A'}</div>` }
+            },
+            {
+              title: 'Objective',
+              code: { text: 'Physical exam and vitals' },
+              text: { div: `<div>${encounter.soapObjective || 'N/A'}</div>` }
+            },
+            {
+              title: 'Assessment',
+              code: { text: 'Diagnoses' },
+              text: { div: `<div>${encounter.soapAssessment || 'N/A'}</div>` }
+            },
+            {
+              title: 'Plan',
+              code: { text: 'Treatment plan' },
+              text: { div: `<div>${encounter.soapPlan || 'N/A'}</div>` }
+            }
+          ]
+        }
+      }
+    ]
+  }
+}
+
 export default app

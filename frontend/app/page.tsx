@@ -1,7 +1,7 @@
 'use client'
 
-import { useState, useEffect } from 'react'
-import { Mic, Square, FileText, Check, Clock, User, Stethoscope } from 'lucide-react'
+import { useState, useEffect, useRef, useCallback } from 'react'
+import { Mic, Square, FileText, Check, Clock, User, Stethoscope, Volume2, Loader2 } from 'lucide-react'
 
 // Types
 interface Encounter {
@@ -19,6 +19,8 @@ interface Encounter {
 }
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001'
+const WHISPER_URL = process.env.NEXT_PUBLIC_WHISPER_URL || 'http://localhost:8088'
+const TTS_URL = process.env.NEXT_PUBLIC_TTS_URL || 'http://localhost:8080'
 
 export default function Home() {
   const [encounters, setEncounters] = useState<Encounter[]>([])
@@ -27,6 +29,13 @@ export default function Home() {
   const [recordingTime, setRecordingTime] = useState(0)
   const [loading, setLoading] = useState(true)
   const [generating, setGenerating] = useState(false)
+  const [transcribing, setTranscribing] = useState(false)
+  const [playingAudio, setPlayingAudio] = useState(false)
+
+  // Refs
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null)
+  const audioChunksRef = useRef<Blob[]>([])
+  const audioPlayerRef = useRef<HTMLAudioElement | null>(null)
 
   // Fetch encounters
   const fetchEncounters = async () => {
@@ -74,35 +83,122 @@ export default function Home() {
     }
   }
 
-  const startRecording = () => {
-    setIsRecording(true)
-    setRecordingTime(0)
-  }
-
-  const stopRecording = async () => {
-    setIsRecording(false)
-
-    // Create new encounter with demo patient
+  // Start audio recording
+  const startRecording = async () => {
     try {
-      const res = await fetch(`${API_BASE}/api/encounters`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          patientId: `patient-${Date.now()}`,
-          patientName: 'New Patient',
-        }),
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          sampleRate: 16000
+        }
       })
 
-      if (res.ok) {
-        const newEncounter = await res.json()
-        fetchEncounters()
-        setSelectedEncounter(newEncounter)
+      mediaRecorderRef.current = new MediaRecorder(stream, {
+        mimeType: 'audio/webm'
+      })
+
+      audioChunksRef.current = []
+
+      mediaRecorderRef.current.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          audioChunksRef.current.push(event.data)
+        }
       }
+
+      mediaRecorderRef.current.start(1000) // Collect chunks every second
+      setIsRecording(true)
+      setRecordingTime(0)
     } catch (error) {
-      console.error('Failed to create encounter:', error)
+      console.error('Failed to start recording:', error)
+      alert('Could not access microphone. Please allow microphone access.')
     }
   }
 
+  // Stop recording and transcribe
+  const stopRecording = async () => {
+    if (!mediaRecorderRef.current) return
+
+    return new Promise<void>((resolve) => {
+      mediaRecorderRef.current!.onstop = async () => {
+        setIsRecording(false)
+
+        // Stop all tracks
+        mediaRecorderRef.current!.stream.getTracks().forEach(track => track.stop())
+
+        // Create audio blob
+        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' })
+
+        // Create encounter first
+        try {
+          const createRes = await fetch(`${API_BASE}/api/encounters`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              patientId: `patient-${Date.now()}`,
+              patientName: 'New Patient',
+            }),
+          })
+
+          if (createRes.ok) {
+            const newEncounter = await createRes.json()
+
+            // Transcribe audio
+            await transcribeAudio(audioBlob, newEncounter.id)
+            fetchEncounters()
+            setSelectedEncounter({ ...newEncounter, transcript: 'Transcribing...' })
+          }
+        } catch (error) {
+          console.error('Failed to create encounter:', error)
+        }
+
+        resolve()
+      }
+
+      mediaRecorderRef.current.stop()
+    })
+  }
+
+  // Transcribe audio using Whisper
+  const transcribeAudio = async (audioBlob: Blob, encounterId: string) => {
+    setTranscribing(true)
+    try {
+      const formData = new FormData()
+      formData.append('file', audioBlob, 'recording.webm')
+      formData.append('model', 'tiny')
+      formData.append('language', 'en')
+
+      const response = await fetch(`${WHISPER_URL}/transcribe`, {
+        method: 'POST',
+        body: formData,
+      })
+
+      if (!response.ok) {
+        throw new Error('Transcription failed')
+      }
+
+      const result = await response.json()
+      const transcript = result.text || result.transcript || ''
+
+      // Update encounter with transcript
+      await fetch(`${API_BASE}/api/encounters/${encounterId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          transcript,
+          status: 'PROCESSING'
+        }),
+      })
+
+      fetchEncounters()
+    } catch (error) {
+      console.error('Transcription error:', error)
+    } finally {
+      setTranscribing(false)
+    }
+  }
+
+  // Generate SOAP from transcript
   const generateSOAP = async (encounter: Encounter) => {
     setGenerating(true)
     try {
@@ -112,7 +208,6 @@ export default function Home() {
 
       if (res.ok) {
         fetchEncounters()
-        // Refresh selected encounter
         const refreshed = encounters.find(e => e.id === encounter.id)
         if (refreshed) setSelectedEncounter(refreshed)
       }
@@ -123,6 +218,7 @@ export default function Home() {
     }
   }
 
+  // Sign encounter
   const signEncounter = async (encounter: Encounter) => {
     try {
       const res = await fetch(`${API_BASE}/api/encounters/${encounter.id}/sign`, {
@@ -135,6 +231,47 @@ export default function Home() {
       }
     } catch (error) {
       console.error('Failed to sign encounter:', error)
+    }
+  }
+
+  // Play SOAP note using Kokoro TTS
+  const playSOAP = async (encounter: Encounter) => {
+    if (!encounter.soapSubjective) return
+
+    setPlayingAudio(true)
+    try {
+      const textToRead = `
+        Subjective: ${encounter.soapSubjective}
+        Objective: ${encounter.soapObjective}
+        Assessment: ${encounter.soapAssessment}
+        Plan: ${encounter.soapPlan}
+      `
+
+      const response = await fetch(`${TTS_URL}/v1/audio/speech`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          input: textToRead,
+          voice: 'af_heart',
+          response_format: 'mp3',
+        }),
+      })
+
+      if (!response.ok) {
+        throw new Error('TTS request failed')
+      }
+
+      const audioBlob = await response.blob()
+      const audioUrl = URL.createObjectURL(audioBlob)
+
+      if (audioPlayerRef.current) {
+        audioPlayerRef.current.src = audioUrl
+        audioPlayerRef.current.play()
+      }
+    } catch (error) {
+      console.error('TTS error:', error)
+    } finally {
+      setPlayingAudio(false)
     }
   }
 
@@ -168,6 +305,10 @@ export default function Home() {
                     <Mic className="h-10 w-10 text-red-600" />
                   </div>
                   <div className="text-3xl font-mono mb-4">{formatTime(recordingTime)}</div>
+                  <div className="flex items-center justify-center gap-2 text-sm text-gray-500 mb-4">
+                    <span className="w-2 h-2 bg-red-500 rounded-full animate-ping"></span>
+                    Recording...
+                  </div>
                   <button
                     onClick={stopRecording}
                     className="w-full bg-gray-900 text-white py-3 rounded-lg flex items-center justify-center gap-2 hover:bg-gray-800"
@@ -188,6 +329,9 @@ export default function Home() {
                     <Mic className="h-4 w-4" />
                     Start Recording
                   </button>
+                  <p className="text-xs text-gray-500 mt-2">
+                    Records audio and auto-transcribes via Whisper
+                  </p>
                 </div>
               )}
             </div>
@@ -245,7 +389,16 @@ export default function Home() {
                   <div>
                     <h3 className="font-medium text-gray-900 mb-2">Transcript</h3>
                     <div className="bg-gray-50 rounded-lg p-4 text-sm text-gray-700 min-h-[100px]">
-                      {selectedEncounter.transcript || 'No transcript available'}
+                      {transcribing ? (
+                        <div className="flex items-center gap-2">
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                          Transcribing audio with Whisper...
+                        </div>
+                      ) : selectedEncounter.transcript ? (
+                        selectedEncounter.transcript
+                      ) : (
+                        'No transcript available. Start recording to generate transcript.'
+                      )}
                     </div>
                   </div>
 
@@ -254,7 +407,7 @@ export default function Home() {
                     <div className="flex gap-3">
                       <button
                         onClick={() => generateSOAP(selectedEncounter)}
-                        disabled={generating}
+                        disabled={generating || !selectedEncounter.transcript}
                         className="flex-1 bg-blue-600 text-white py-3 rounded-lg flex items-center justify-center gap-2 hover:bg-blue-700 disabled:opacity-50"
                       >
                         <FileText className="h-4 w-4" />
@@ -266,7 +419,17 @@ export default function Home() {
                   {/* SOAP Note */}
                   {selectedEncounter.soapSubjective && (
                     <div className="space-y-4">
-                      <h3 className="font-medium text-gray-900">SOAP Note</h3>
+                      <div className="flex items-center justify-between">
+                        <h3 className="font-medium text-gray-900">SOAP Note</h3>
+                        <button
+                          onClick={() => playSOAP(selectedEncounter)}
+                          disabled={playingAudio}
+                          className="flex items-center gap-2 text-sm text-blue-600 hover:text-blue-700"
+                        >
+                          <Volume2 className="h-4 w-4" />
+                          {playingAudio ? 'Playing...' : 'Read Aloud'}
+                        </button>
+                      </div>
 
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                         <div className="bg-blue-50 rounded-lg p-4">
@@ -314,6 +477,13 @@ export default function Home() {
           </div>
         </div>
       </main>
+
+      {/* Hidden audio player */}
+      <audio
+        ref={audioPlayerRef}
+        onEnded={() => setPlayingAudio(false)}
+        style={{ display: 'none' }}
+      />
     </div>
   )
 }
