@@ -25,7 +25,9 @@ jobs:
 
       - name: Install dependencies
         working-directory: ./ai_service
-        run: uv pip install --system -e ".[dev]"
+        # Removed -e "." to stop setuptools from trying to build the package
+        run: uv pip install --system ".[dev]" 
+
 
       - name: Type check with mypy
         working-directory: ./ai_service
