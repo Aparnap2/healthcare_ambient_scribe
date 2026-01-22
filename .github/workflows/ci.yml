@@ -21,23 +21,23 @@ jobs:
           python-version: "3.10"
 
       - name: Setup uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@v5
 
       - name: Install dependencies
-        working-directory: ./backend
+        working-directory: ./ai_service
         run: uv pip install --system -e ".[dev]"
 
       - name: Type check with mypy
-        working-directory: ./backend
+        working-directory: ./ai_service
         run: uv pip install mypy && mypy src/ --strict
 
       - name: Run unit tests
-        working-directory: ./backend
+        working-directory: ./ai_service
         run: uv run pytest tests/test_audio_chunking.py tests/test_fhir_converter.py tests/test_redaction.py -v
 
       - name: Run LLM evaluations
         if: github.event_name == 'pull_request'
-        working-directory: ./backend
+        working-directory: ./ai_service
         run: uv run pytest tests/test_llm_evals.py -v --tb=short
         env:
           DEEPEVAL_LOG_FILE: deepeval.log
@@ -92,9 +92,11 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Run Backend lint
+        working-directory: ./ai_service
         run: |
-          echo "Backend linting - add ruff/flake8 here if needed"
-
+          echo "Backend linting in ai_service directory"
+          # Example: uv run ruff check .
+          
       - name: Run Frontend lint
         working-directory: ./frontend
         run: pnpm lint
