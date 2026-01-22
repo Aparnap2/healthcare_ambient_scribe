@@ -25,16 +25,16 @@ jobs:
 
       - name: Install dependencies
         working-directory: ./ai_service
-        # We install requirements directly to avoid the "Multiple top-level modules" build error
+        # Bypasses the package build error while getting all dependencies
         run: uv pip install --system -r pyproject.toml --all-extras
 
       - name: Type check with mypy
         working-directory: ./ai_service
-        run: uv pip install mypy && mypy . --strict
+        # Added --system flag here
+        run: uv pip install --system mypy && mypy . --strict
 
       - name: Run unit tests
         working-directory: ./ai_service
-        # Setting PYTHONPATH=. ensures local modules are importable without a formal install
         run: PYTHONPATH=. uv run pytest tests/test_audio_chunking.py tests/test_fhir_converter.py tests/test_redaction.py -v
 
       - name: Run LLM evaluations
@@ -97,7 +97,7 @@ jobs:
         working-directory: ./ai_service
         run: |
           echo "Running linting in ai_service..."
-          # If using ruff: uv pip install ruff && ruff check .
+          # If you want to use ruff: uv pip install --system ruff && ruff check .
           
       - name: Run Frontend lint
         working-directory: ./frontend
